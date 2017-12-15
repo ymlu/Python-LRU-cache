@@ -1,11 +1,11 @@
-from collections import OrderedDict
+from collections import namedtuple, OrderedDict
 import time
-from itertools import islice
+from functools import wraps
 import threading
 import weakref
-from contextlib import contextmanager
 
-def lru_cache_function(max_size=1024, expiration=15*60):
+
+def lru_cache_function(max_size=128, expiration=300):
     """
     >>> @lru_cache_function(3, 1)
     ... def f(x):
@@ -17,9 +17,19 @@ def lru_cache_function(max_size=1024, expiration=15*60):
     >>> f(3)
     3
     """
-    def wrapper(func):
-        return LRUCachedFunction(func, LRUCacheDict(max_size, expiration))
-    return wrapper
+    def decorating_function(func):
+        cached_func = LRUCachedFunction(func, cache=LRUCacheDict(
+            max_size=max_size, expiration=expiration))
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return cached_func(*args, **kwargs)
+
+        wrapper.cache_info = cached_func.cache_info
+        wrapper.cache_clear = cached_func.cache_clear
+        return wrapper
+    return decorating_function
+
 
 def _lock_decorator(func):
     """
@@ -34,6 +44,10 @@ def _lock_decorator(func):
             return func(self, *args, **kwargs)
     withlock.__name__ == func.__name__
     return withlock
+
+
+CacheInfo = namedtuple('CacheInfo', 'hits misses maxsize currsize')
+
 
 class LRUCacheDict(object):
     """ A dictionary-like object, supporting LRU caching semantics.
@@ -152,7 +166,7 @@ class LRUCacheDict(object):
 
     @_lock_decorator
     def __setitem__(self, key, value):
-        t = int(time.time())
+        t = time.time()
         self.__delete__(key)
         self.__values[key] = value
         self.__access_times[key] = t
@@ -161,7 +175,7 @@ class LRUCacheDict(object):
 
     @_lock_decorator
     def __getitem__(self, key):
-        t = int(time.time())
+        t = time.time()
         del self.__access_times[key]
         self.__access_times[key] = t
         self.cleanup()
@@ -178,7 +192,7 @@ class LRUCacheDict(object):
     def cleanup(self):
         if self.expiration is None:
             return None
-        t = int(time.time())
+        t = time.time()
         #Delete expired
         next_expire = None
         for k in self.__expire_times:
@@ -197,6 +211,7 @@ class LRUCacheDict(object):
             return next_expire - t
         else:
             return None
+
 
 class LRUCachedFunction(object):
     """
@@ -239,15 +254,30 @@ class LRUCachedFunction(object):
             self.cache = LRUCacheDict()
         self.function = function
         self.__name__ = self.function.__name__
+        self.cache_hits = 0
+        self.cache_misses = 0
 
     def __call__(self, *args, **kwargs):
         key = repr( (args, kwargs) ) + "#" + self.__name__ #In principle a python repr(...) should not return any # characters.
         try:
-            return self.cache[key]
+            value = self.cache[key]
+            self.cache_hits += 1
         except KeyError:
+            self.cache_misses += 1
             value = self.function(*args, **kwargs)
             self.cache[key] = value
-            return value
+        return value
+
+    def cache_info(self):
+        return CacheInfo(hits=self.cache_hits, misses=self.cache_misses,
+                         maxsize=self.cache.max_size,
+                         currsize=self.cache.size())
+
+    def cache_clear(self):
+        self.cache.clear()
+        self.cache_hits = 0
+        self.cache_misses = 0
+
 
 if __name__ == "__main__":
     import doctest
